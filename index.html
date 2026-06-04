@@ -3,46 +3,59 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#111111" />
   <title>Playback Cifras</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="app">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand">
+  <div class="app">
+    <aside class="sidebar">
+      <header>
         <h1>Playback Cifras</h1>
-        <p>PDF + MP3 sincronizados por música</p>
-      </div>
-      <div class="search-box">
-        <input id="searchInput" type="search" placeholder="Buscar música..." autocomplete="off" />
-      </div>
-      <ol class="song-list" id="songList"></ol>
-    </aside>
-
-    <section class="stage">
-      <header class="topbar">
-        <button id="menuBtn" class="icon-btn" aria-label="Abrir lista">☰</button>
-        <div class="song-info">
-          <strong id="songTitle">Carregando...</strong>
-          <span id="songCounter"></span>
-        </div>
-        <button id="fullscreenBtn" class="small-btn">Tela cheia</button>
+        <p>Google Drive • PDF + MP3</p>
       </header>
 
-      <section class="viewer-wrap">
-        <iframe id="pdfViewer" class="pdf-viewer" title="Visualizador da cifra em PDF"></iframe>
+      <section class="setup" id="setupPanel">
+        <button id="loginBtn" class="primary">Entrar com Google</button>
+        <label>Pasta principal do Drive</label>
+        <input id="rootFolderInput" placeholder="ID da pasta principal" />
+        <button id="syncBtn">Atualizar biblioteca</button>
+        <p class="hint">Estrutura: uma pasta principal contendo subpastas por estilo. Dentro de cada estilo, coloque PDF e MP3 com o mesmo nome.</p>
       </section>
 
-      <footer class="player-bar">
-        <button id="prevBtn" class="nav-btn">← Anterior</button>
-        <audio id="audioPlayer" controls preload="metadata"></audio>
-        <button id="nextBtn" class="nav-btn">Próxima →</button>
-      </footer>
-    </section>
-  </main>
+      <section class="filters">
+        <label>Estilo</label>
+        <select id="styleSelect"></select>
+        <input id="searchInput" placeholder="Buscar música..." />
+      </section>
 
+      <nav id="songList" class="song-list"></nav>
+    </aside>
+
+    <main class="stage">
+      <div class="topbar">
+        <div>
+          <strong id="songTitle">Nenhuma música carregada</strong>
+          <span id="songMeta"></span>
+        </div>
+        <button id="fullscreenBtn">Tela cheia</button>
+      </div>
+
+      <iframe id="pdfFrame" title="Cifra PDF"></iframe>
+
+      <div class="playerbar">
+        <button id="prevBtn">← Anterior</button>
+        <button id="playBtn" class="play">▶</button>
+        <audio id="audio" controls></audio>
+        <button id="nextBtn">Próxima →</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
