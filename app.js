@@ -8,7 +8,9 @@ const STORAGE = {
   favorites: 'pc_favorites_v1',
   playlists: 'pc_playlists_v1',
   activePlaylist: 'pc_active_playlist',
-  library: 'pc_library_cache_v1'
+  library: 'pc_library_cache_v1',
+  connected: 'pc_google_connected',
+  pdfZoom: 'pc_pdf_zoom'
 };
 
 const els = {};
@@ -27,6 +29,8 @@ let currentPdfMode = 'preview';
 let audioLoadSeq = 0;
 let autoScrollTimer = null;
 let autoScrollSpeed = 1;
+let pdfZoom = 1;
+let tokenRequestResolve = null;
 
 window.addEventListener('DOMContentLoaded', init);
 
@@ -42,11 +46,12 @@ function init(){
 }
 
 function bindEls(){
-  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','pdfScroll','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast','favoriteBtn','playlistSelect','newPlaylistBtn','addPlaylistBtn','deletePlaylistBtn','autoScrollBtn','speedDownBtn','speedUpBtn','speedLabel'].forEach(id=>els[id]=document.getElementById(id));
+  ['googleBtn','logoutBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','pdfScroll','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast','favoriteBtn','playlistSelect','newPlaylistBtn','addPlaylistBtn','deletePlaylistBtn','zoomOutBtn','zoomLabel','zoomInBtn','autoScrollBtn','speedDownBtn','speedUpBtn','speedLabel'].forEach(id=>els[id]=document.getElementById(id));
 }
 
 function bindEvents(){
   els.googleBtn.addEventListener('click', login);
+  els.logoutBtn.addEventListener('click', logout);
   els.pickFolderBtn.addEventListener('click', openPicker);
   els.refreshBtn.addEventListener('click', refreshLibrary);
   els.clearFolderBtn.addEventListener('click', clearFolder);
@@ -62,6 +67,8 @@ function bindEvents(){
   els.newPlaylistBtn.addEventListener('click', createPlaylist);
   els.addPlaylistBtn.addEventListener('click', addCurrentToPlaylist);
   els.deletePlaylistBtn.addEventListener('click', deletePlaylist);
+  els.zoomOutBtn.addEventListener('click',()=>changePdfZoom(-0.1));
+  els.zoomInBtn.addEventListener('click',()=>changePdfZoom(0.1));
   els.autoScrollBtn.addEventListener('click', toggleAutoScroll);
   els.speedDownBtn.addEventListener('click',()=>changeScrollSpeed(-1));
   els.speedUpBtn.addEventListener('click',()=>changeScrollSpeed(1));
@@ -73,6 +80,7 @@ function bindEvents(){
 }
 
 function restoreUi(){
+  updateLoginUi(localStorage.getItem(STORAGE.connected)==='1');
   const savedFolder = localStorage.getItem(STORAGE.folder) || window.APP_CONFIG?.ROOT_FOLDER_ID || '';
   els.folderIdInput.value = savedFolder;
   if(localStorage.getItem(STORAGE.stage)==='1') document.body.classList.add('stage');
@@ -80,6 +88,7 @@ function restoreUi(){
   loadCachedLibrary();
   renderPlaylists();
   updateSpeedLabel();
+  updateZoomLabel();
 }
 
 
@@ -111,36 +120,88 @@ function setupTokenClient(){
     client_id: clientId,
     scope: SCOPES,
     callback: async (resp)=>{
-      if(resp.error){ toast('Erro no login: '+resp.error); return; }
+      if(resp.error){
+        if(tokenRequestResolve){ tokenRequestResolve(false); tokenRequestResolve=null; }
+        toast('Erro no login: '+resp.error);
+        return;
+      }
       accessToken = resp.access_token;
       localStorage.setItem(STORAGE.token, accessToken);
-      els.loginStatus.textContent = 'Google conectado';
-      els.googleBtn.textContent = 'Google conectado';
+      localStorage.setItem(STORAGE.connected, '1');
+      updateLoginUi(true);
+      if(tokenRequestResolve){ tokenRequestResolve(true); tokenRequestResolve=null; }
       if(els.folderIdInput.value.trim()) await refreshLibrary(true);
     }
   });
-  if(els.folderIdInput.value.trim()){
-    setTimeout(()=>tokenClient.requestAccessToken({prompt:''}), 500);
+
+  // Mantém a sessão prática: se o usuário já autorizou antes, tenta renovar silenciosamente.
+  // Não guarda senha; apenas reutiliza a sessão Google já ativa no navegador/iPad.
+  if(localStorage.getItem(STORAGE.connected)==='1' || localStorage.getItem(STORAGE.folder)){
+    setTimeout(()=>requestToken('').catch(()=>{}), 500);
   }
 }
 
-function login(){
-  if(!tokenClient){ toast('Login ainda não carregou. Tente novamente.'); return; }
-  tokenClient.requestAccessToken({prompt:'consent'});
+async function requestToken(prompt=''){
+  if(!tokenClient) return false;
+  return new Promise(resolve=>{
+    tokenRequestResolve = resolve;
+    try{ tokenClient.requestAccessToken({prompt}); }
+    catch(err){ console.error(err); tokenRequestResolve=null; resolve(false); }
+    setTimeout(()=>{ if(tokenRequestResolve){ tokenRequestResolve=null; tokenRequestResolve=null; resolve(false); } }, 15000);
+  });
 }
 
-function ensureLogin(){
+async function login(){
+  const ok = await requestToken('consent');
+  if(!ok) toast('Não foi possível concluir o login Google.');
+}
+
+async function logout(){
+  const token = accessToken || localStorage.getItem(STORAGE.token) || '';
+  if(token && window.google?.accounts?.oauth2){
+    try{ google.accounts.oauth2.revoke(token, ()=>{}); }catch{}
+  }
+  accessToken = '';
+  localStorage.removeItem(STORAGE.token);
+  localStorage.removeItem(STORAGE.connected);
+  updateLoginUi(false);
+  toast('Login Google removido deste dispositivo.');
+}
+
+function updateLoginUi(connected){
+  els.loginStatus.textContent = connected ? 'Google conectado' : 'Desconectado';
+  els.googleBtn.textContent = connected ? 'Reconectar Google' : 'Entrar com Google';
+  if(els.logoutBtn) els.logoutBtn.style.display = connected ? 'block' : 'none';
+}
+
+async function ensureLogin(){
   if(accessToken) return true;
+  if(localStorage.getItem(STORAGE.connected)==='1'){
+    const ok = await requestToken('');
+    if(ok) return true;
+  }
   toast('Entre com Google primeiro.');
   return false;
 }
 
 function authHeaders(){ return {Authorization:`Bearer ${accessToken}`}; }
 
+async function fetchWithAuth(url, options={}, retry=true){
+  if(!accessToken && localStorage.getItem(STORAGE.connected)==='1'){
+    await requestToken('');
+  }
+  const res = await fetch(url, {...options, headers:{...(options.headers||{}), ...authHeaders()}});
+  if(res.status === 401 && retry){
+    const ok = await requestToken('');
+    if(ok) return fetchWithAuth(url, options, false);
+  }
+  return res;
+}
+
 async function driveList(params){
   const url = new URL(DRIVE_FILES);
   Object.entries(params).forEach(([k,v])=>{ if(v!==undefined && v!==null && v!=='') url.searchParams.set(k,v); });
-  const res = await fetch(url.toString(), {headers:authHeaders()});
+  const res = await fetchWithAuth(url.toString());
   if(!res.ok){
     const txt = await res.text();
     throw new Error(`Erro Drive ${res.status}: ${txt}`);
@@ -151,7 +212,7 @@ async function driveList(params){
 async function driveGet(fileId, fields='id,name,mimeType'){
   const url = new URL(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`);
   url.searchParams.set('fields', fields);
-  const res = await fetch(url.toString(), {headers:authHeaders()});
+  const res = await fetchWithAuth(url.toString());
   if(!res.ok){
     const txt = await res.text();
     throw new Error(`Erro Drive ${res.status}: ${txt}`);
@@ -170,7 +231,7 @@ async function listAll(params){
 }
 
 async function refreshLibrary(silent=false){
-  if(!ensureLogin()) return;
+  if(!(await ensureLogin())) return;
   const rootId = extractFolderId(els.folderIdInput.value.trim());
   if(!rootId){ toast('Informe ou selecione uma pasta do Drive.'); return; }
   els.folderIdInput.value = rootId;
@@ -347,9 +408,7 @@ function getDrivePreviewUrl(fileId){
 }
 
 async function getAuthorizedFileObjectUrl(fileId, kind){
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-    headers: authHeaders()
-  });
+  const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
   if(!res.ok){
     const txt = await res.text();
     throw new Error(`Erro ao baixar arquivo ${res.status}: ${txt}`);
@@ -433,8 +492,8 @@ function clearFolder(){
   toast('Pasta salva removida deste dispositivo.');
 }
 
-function openPicker(){
-  if(!ensureLogin()) return;
+async function openPicker(){
+  if(!(await ensureLogin())) return;
   if(!pickerReady || !window.google?.picker){ toast('Seletor do Drive ainda está carregando.'); return; }
   const apiKey = window.APP_CONFIG?.GOOGLE_API_KEY || '';
   if(!apiKey){ toast('Google Picker precisa de API Key. Você ainda pode colar o ID da pasta manualmente.'); return; }
@@ -571,18 +630,19 @@ function stopAutoScroll(showToast=true){
   if(showToast) toast('Rolagem pausada.');
 }
 
-async function ensureScrollablePdf(song){
+async function ensureScrollablePdf(song, forceRender=false){
   if(!window.pdfjsLib) throw new Error('PDF.js não carregou.');
-  if(currentPdfMode === 'scroll' && els.pdfScroll?.dataset.fileId === song.pdfId) return;
+  if(!forceRender && currentPdfMode === 'scroll' && els.pdfScroll?.dataset.fileId === song.pdfId && Number(els.pdfScroll?.dataset.zoom||1) === pdfZoom) return;
   currentPdfMode = 'scroll';
   const seq = ++pdfRenderSeq;
   const viewer = document.getElementById('viewer');
   if(viewer) viewer.classList.add('scroll-mode');
   els.pdfScroll.classList.add('active');
   els.pdfScroll.dataset.fileId = song.pdfId;
+  els.pdfScroll.dataset.zoom = String(pdfZoom);
   els.pdfScroll.innerHTML = '<div class="pdf-loading">Preparando rolagem automática...</div>';
 
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${song.pdfId}?alt=media`, {headers: authHeaders()});
+  const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${song.pdfId}?alt=media`);
   if(!res.ok) throw new Error('Erro ao baixar PDF para rolagem.');
   const data = await res.arrayBuffer();
   if(seq !== pdfRenderSeq) return;
@@ -598,7 +658,7 @@ async function ensureScrollablePdf(song){
     const baseViewport = page.getViewport({scale:1});
     const availableWidth = Math.max(320, els.pdfScroll.clientWidth - 24);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cssScale = availableWidth / baseViewport.width;
+    const cssScale = (availableWidth / baseViewport.width) * pdfZoom;
     const renderViewport = page.getViewport({scale: cssScale * dpr});
     const cssViewport = page.getViewport({scale: cssScale});
 
@@ -613,6 +673,26 @@ async function ensureScrollablePdf(song){
     await page.render({canvasContext:ctx, viewport:renderViewport}).promise;
   }
 }
+
+async function changePdfZoom(delta){
+  const song = filteredSongs[currentIndex];
+  if(!song){ toast('Carregue uma música primeiro.'); return; }
+  pdfZoom = Math.max(0.6, Math.min(2.4, Number((pdfZoom + delta).toFixed(2))));
+  localStorage.setItem(STORAGE.pdfZoom, String(pdfZoom));
+  updateZoomLabel();
+  try{
+    await ensureScrollablePdf(song, true);
+    toast(`Zoom do PDF: ${Math.round(pdfZoom*100)}%`);
+  }catch(err){
+    console.error(err);
+    toast('Não consegui aplicar zoom neste PDF.');
+  }
+}
+function updateZoomLabel(){
+  pdfZoom = Number(localStorage.getItem(STORAGE.pdfZoom) || pdfZoom || 1);
+  if(els.zoomLabel) els.zoomLabel.textContent = `${Math.round(pdfZoom*100)}%`;
+}
+
 function changeScrollSpeed(delta){
   autoScrollSpeed = Math.max(1, Math.min(12, autoScrollSpeed + delta));
   localStorage.setItem('pc_scroll_speed', String(autoScrollSpeed));

@@ -49,3 +49,9 @@ A rolagem automática depende do visualizador de PDF do navegador. No iPad/Safar
 - PDF voltou a usar preview nativo do Google Drive para carregar todas as páginas, zoom/pinch e maior velocidade.
 - MP3 continua via API autenticada.
 - Mantém favoritos, playlists, modo palco e rolagem automática.
+
+
+## V10
+- Corrige zoom do PDF em modo interno com botões A-/A+.
+- Mantém login Google entre sessões quando possível, renovando o token silenciosamente.
+- Adiciona botão Sair do Google para revogar/remover a sessão do dispositivo.
