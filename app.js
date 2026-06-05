@@ -4,7 +4,11 @@ const STORAGE = {
   token: 'pc_token',
   folder: 'pc_root_folder_id',
   style: 'pc_selected_style',
-  stage: 'pc_stage_mode'
+  stage: 'pc_stage_mode',
+  favorites: 'pc_favorites_v1',
+  playlists: 'pc_playlists_v1',
+  activePlaylist: 'pc_active_playlist',
+  library: 'pc_library_cache_v1'
 };
 
 const els = {};
@@ -19,6 +23,8 @@ let gapiReady = false;
 let currentAudioObjectUrl = '';
 let currentPdfObjectUrl = '';
 let audioLoadSeq = 0;
+let autoScrollTimer = null;
+let autoScrollSpeed = 1;
 
 window.addEventListener('DOMContentLoaded', init);
 
@@ -31,7 +37,7 @@ function init(){
 }
 
 function bindEls(){
-  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast'].forEach(id=>els[id]=document.getElementById(id));
+  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast','favoriteBtn','playlistSelect','newPlaylistBtn','addPlaylistBtn','deletePlaylistBtn','autoScrollBtn','speedDownBtn','speedUpBtn','speedLabel'].forEach(id=>els[id]=document.getElementById(id));
 }
 
 function bindEvents(){
@@ -46,6 +52,14 @@ function bindEvents(){
   els.playBtn.addEventListener('click', togglePlay);
   els.stageBtn.addEventListener('click', toggleStage);
   els.fullscreenBtn.addEventListener('click', fullscreen);
+  els.favoriteBtn.addEventListener('click', toggleFavorite);
+  els.playlistSelect.addEventListener('change',()=>{localStorage.setItem(STORAGE.activePlaylist, els.playlistSelect.value); applyFilters();});
+  els.newPlaylistBtn.addEventListener('click', createPlaylist);
+  els.addPlaylistBtn.addEventListener('click', addCurrentToPlaylist);
+  els.deletePlaylistBtn.addEventListener('click', deletePlaylist);
+  els.autoScrollBtn.addEventListener('click', toggleAutoScroll);
+  els.speedDownBtn.addEventListener('click',()=>changeScrollSpeed(-1));
+  els.speedUpBtn.addEventListener('click',()=>changeScrollSpeed(1));
   els.showSidebar.addEventListener('click',()=>els.sidebar.classList.add('open'));
   els.toggleSidebar.addEventListener('click',()=>els.sidebar.classList.remove('open'));
   els.audio.addEventListener('play',()=>els.playBtn.textContent='⏸');
@@ -58,7 +72,11 @@ function restoreUi(){
   els.folderIdInput.value = savedFolder;
   if(localStorage.getItem(STORAGE.stage)==='1') document.body.classList.add('stage');
   updateStageBtn();
+  loadCachedLibrary();
+  renderPlaylists();
+  updateSpeedLabel();
 }
+
 
 function registerSW(){
   if('serviceWorker' in navigator){navigator.serviceWorker.register('./service-worker.js').catch(()=>{});}
@@ -96,6 +114,9 @@ function setupTokenClient(){
       if(els.folderIdInput.value.trim()) await refreshLibrary(true);
     }
   });
+  if(els.folderIdInput.value.trim()){
+    setTimeout(()=>tokenClient.requestAccessToken({prompt:''}), 500);
+  }
 }
 
 function login(){
@@ -186,6 +207,7 @@ async function refreshLibrary(silent=false){
     }
 
     library = dedupeSongs(result).sort((a,b)=>a.style.localeCompare(b.style,'pt-BR') || a.title.localeCompare(b.title,'pt-BR'));
+    localStorage.setItem(STORAGE.library, JSON.stringify(library));
     renderStyles();
     applyFilters();
     if(library.length){
@@ -232,17 +254,39 @@ function pairFiles(style, files){
   }));
 }
 
+
+function loadCachedLibrary(){
+  try{
+    const cached = JSON.parse(localStorage.getItem(STORAGE.library) || '[]');
+    if(Array.isArray(cached) && cached.length){
+      library = cached;
+      renderStyles();
+      applyFilters();
+      toast('Biblioteca salva carregada. Entre com Google para sincronizar.');
+    }
+  }catch{}
+}
+
 function renderStyles(){
   const styles = [...new Set(library.map(s=>s.style))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const saved = localStorage.getItem(STORAGE.style);
-  els.styleSelect.innerHTML = '<option value="">Todos os estilos</option>' + styles.map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
-  if(saved && styles.includes(saved)) els.styleSelect.value = saved;
+  els.styleSelect.innerHTML = '<option value="">Todos os estilos</option><option value="__favorites">⭐ Favoritas</option>' + styles.map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  if(saved && (styles.includes(saved) || saved === '__favorites')) els.styleSelect.value = saved;
 }
 
 function applyFilters(){
   const style = els.styleSelect.value;
+  const playlist = els.playlistSelect.value;
   const q = removeAccents(els.searchInput.value.trim().toLowerCase());
-  filteredSongs = library.filter(s=>(!style || s.style===style) && (!q || removeAccents(s.title.toLowerCase()).includes(q)));
+  const favs = getFavorites();
+  const playlists = getPlaylists();
+  filteredSongs = library.filter(s=>{
+    const key = songKey(s);
+    const okStyle = !style || (style === '__favorites' ? favs.includes(key) : s.style===style);
+    const okPlaylist = !playlist || (playlists[playlist]||[]).includes(key);
+    const okSearch = !q || removeAccents(s.title.toLowerCase()).includes(q);
+    return okStyle && okPlaylist && okSearch;
+  });
   renderSongs();
   if(filteredSongs.length){ loadSong(Math.max(0, Math.min(currentIndex, filteredSongs.length-1)), false); }
   else { clearCurrent(); }
@@ -261,6 +305,8 @@ async function loadSong(index, autoplay=false){
 
   els.songTitle.textContent = song.title;
   els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • carregando arquivos...`;
+  updateFavoriteButton();
+  stopAutoScroll(false);
   els.emptyState.style.display = 'none';
   renderSongs();
 
@@ -280,6 +326,7 @@ async function loadSong(index, autoplay=false){
     if(autoplay){
       setTimeout(()=>els.audio.play().catch(()=>{}),250);
     }
+    updateFavoriteButton();
   }catch(err){
     console.error(err);
     if(seq === audioLoadSeq){
@@ -351,6 +398,7 @@ function fullscreen(){ const el=document.documentElement; if(!document.fullscree
 
 function clearFolder(){
   localStorage.removeItem(STORAGE.folder);
+  localStorage.removeItem(STORAGE.library);
   els.folderIdInput.value='';
   library=[]; filteredSongs=[]; renderStyles(); renderSongs(); clearCurrent();
   toast('Pasta salva removida deste dispositivo.');
@@ -387,6 +435,112 @@ function keyboard(e){
   if(e.key==='ArrowLeft') prevSong();
   if(e.key===' ') { e.preventDefault(); togglePlay(); }
   if(e.key.toLowerCase()==='m') toggleStage();
+  if(e.key.toLowerCase()==='f') toggleFavorite();
+  if(e.key.toLowerCase()==='s') toggleAutoScroll();
+}
+
+
+function songKey(song){ return `${song.styleId || song.style}|${song.title}`; }
+function getFavorites(){ try{return JSON.parse(localStorage.getItem(STORAGE.favorites)||'[]');}catch{return [];} }
+function setFavorites(list){ localStorage.setItem(STORAGE.favorites, JSON.stringify([...new Set(list)])); }
+function toggleFavorite(){
+  const song = filteredSongs[currentIndex];
+  if(!song) return;
+  const key = songKey(song);
+  let favs = getFavorites();
+  if(favs.includes(key)){ favs = favs.filter(x=>x!==key); toast('Removida das favoritas.'); }
+  else { favs.push(key); toast('Adicionada às favoritas.'); }
+  setFavorites(favs);
+  updateFavoriteButton();
+  if(els.styleSelect.value === '__favorites') applyFilters();
+}
+function updateFavoriteButton(){
+  const song = filteredSongs[currentIndex];
+  if(!song){ els.favoriteBtn.textContent='☆'; return; }
+  els.favoriteBtn.textContent = getFavorites().includes(songKey(song)) ? '★' : '☆';
+}
+function getPlaylists(){ try{return JSON.parse(localStorage.getItem(STORAGE.playlists)||'{}');}catch{return {};} }
+function setPlaylists(obj){ localStorage.setItem(STORAGE.playlists, JSON.stringify(obj)); }
+function renderPlaylists(){
+  const playlists = getPlaylists();
+  const names = Object.keys(playlists).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const saved = localStorage.getItem(STORAGE.activePlaylist) || '';
+  els.playlistSelect.innerHTML = '<option value="">Todas as playlists</option>' + names.map(n=>`<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  if(saved && names.includes(saved)) els.playlistSelect.value = saved;
+}
+function createPlaylist(){
+  const name = prompt('Nome da playlist/evento:');
+  if(!name || !name.trim()) return;
+  const playlists = getPlaylists();
+  playlists[name.trim()] = playlists[name.trim()] || [];
+  setPlaylists(playlists);
+  localStorage.setItem(STORAGE.activePlaylist, name.trim());
+  renderPlaylists();
+  els.playlistSelect.value = name.trim();
+  toast('Playlist criada.');
+}
+function addCurrentToPlaylist(){
+  const song = filteredSongs[currentIndex];
+  if(!song){ toast('Selecione uma música primeiro.'); return; }
+  let name = els.playlistSelect.value;
+  if(!name){
+    name = prompt('Adicionar a qual playlist? Digite o nome:');
+    if(!name || !name.trim()) return;
+    name = name.trim();
+  }
+  const playlists = getPlaylists();
+  playlists[name] = playlists[name] || [];
+  const key = songKey(song);
+  if(!playlists[name].includes(key)) playlists[name].push(key);
+  setPlaylists(playlists);
+  localStorage.setItem(STORAGE.activePlaylist, name);
+  renderPlaylists();
+  els.playlistSelect.value = name;
+  toast('Música adicionada à playlist.');
+}
+function deletePlaylist(){
+  const name = els.playlistSelect.value;
+  if(!name){ toast('Selecione uma playlist para excluir.'); return; }
+  if(!confirm(`Excluir a playlist "${name}" deste dispositivo?`)) return;
+  const playlists = getPlaylists();
+  delete playlists[name];
+  setPlaylists(playlists);
+  localStorage.removeItem(STORAGE.activePlaylist);
+  renderPlaylists();
+  applyFilters();
+  toast('Playlist excluída.');
+}
+function toggleAutoScroll(){
+  if(autoScrollTimer) { stopAutoScroll(true); return; }
+  startAutoScroll();
+}
+function startAutoScroll(){
+  if(!filteredSongs[currentIndex]) { toast('Carregue uma música primeiro.'); return; }
+  stopAutoScroll(false);
+  els.autoScrollBtn.textContent = '⏸ Rolagem';
+  autoScrollTimer = setInterval(()=>{
+    try{
+      const win = els.pdfFrame.contentWindow;
+      if(win) win.scrollBy(0, autoScrollSpeed);
+    }catch(e){
+      // fallback: tenta rolar o próprio elemento no Safari/iPad
+      els.pdfFrame.scrollTop = (els.pdfFrame.scrollTop || 0) + autoScrollSpeed;
+    }
+  }, 80);
+}
+function stopAutoScroll(showToast=true){
+  if(autoScrollTimer){ clearInterval(autoScrollTimer); autoScrollTimer=null; }
+  if(els.autoScrollBtn) els.autoScrollBtn.textContent = '▶ Rolagem';
+  if(showToast) toast('Rolagem pausada.');
+}
+function changeScrollSpeed(delta){
+  autoScrollSpeed = Math.max(1, Math.min(12, autoScrollSpeed + delta));
+  localStorage.setItem('pc_scroll_speed', String(autoScrollSpeed));
+  updateSpeedLabel();
+}
+function updateSpeedLabel(){
+  autoScrollSpeed = Number(localStorage.getItem('pc_scroll_speed') || autoScrollSpeed || 1);
+  if(els.speedLabel) els.speedLabel.textContent = `${autoScrollSpeed}x`;
 }
 
 function extractFolderId(value){
