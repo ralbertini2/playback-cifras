@@ -12,10 +12,7 @@
   <div id="app" class="app">
     <aside id="sidebar" class="sidebar">
       <header class="brand">
-        <div>
-          <h1>Playback Cifras</h1>
-          <p>Google Drive • PDF + MP3</p>
-        </div>
+        <img src="logo-playback-cifras.jpg" alt="Playback Cifras" class="brand-logo" />
         <button id="toggleSidebar" class="icon-btn hide-desktop" title="Ocultar menu">☰</button>
       </header>
 
@@ -82,11 +79,18 @@
         </div>
       </section>
 
-      <footer class="playerbar">
-        <button id="prevBtn" class="nav-btn">←<span>Anterior</span></button>
-        <button id="playBtn" class="play-btn">▶</button>
-        <audio id="audio" controls preload="metadata"></audio>
-        <button id="nextBtn" class="nav-btn"><span>Próxima</span>→</button>
+      <footer class="playerbar playerbar-v12">
+        <audio id="audio" preload="metadata"></audio>
+        <div class="timeline">
+          <span id="currentTimeLabel">0:00</span>
+          <input id="seekBar" class="seekbar" type="range" min="0" max="1000" value="0" step="1" aria-label="Progresso da música" />
+          <span id="durationLabel">0:00</span>
+        </div>
+        <div class="big-controls compact-controls">
+          <button id="prevBtn" class="control-tile" type="button" aria-label="Voltar música"><span class="control-icon prev-flat"></span><span>Voltar</span></button>
+          <button id="playBtn" class="control-tile play-tile" type="button" aria-label="Tocar ou pausar"><span class="control-icon play-flat"></span><span>Tocar</span></button>
+          <button id="nextBtn" class="control-tile" type="button" aria-label="Próxima música"><span class="control-icon next-flat"></span><span>Próxima</span></button>
+        </div>
       </footer>
     </main>
   </div>
