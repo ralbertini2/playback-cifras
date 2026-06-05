@@ -314,10 +314,11 @@ async function loadSong(index, autoplay=false){
   resetPdfSource();
 
   try{
-    const [pdfUrl, audioUrl] = await Promise.all([
-      getAuthorizedFileObjectUrl(song.pdfId, 'pdf'),
-      getAuthorizedFileObjectUrl(song.mp3Id, 'audio')
-    ]);
+    // PDF: usar o preview nativo do Google Drive.
+    // Isso carrega progressivamente, mostra todas as páginas e mantém o zoom/pinch do visualizador,
+    // evitando baixar o PDF inteiro como blob antes de exibir.
+    const pdfUrl = getDrivePreviewUrl(song.pdfId);
+    const audioUrl = await getAuthorizedFileObjectUrl(song.mp3Id, 'audio');
     if(seq !== audioLoadSeq) return;
     els.pdfFrame.src = pdfUrl;
     els.audio.src = audioUrl;
@@ -334,6 +335,10 @@ async function loadSong(index, autoplay=false){
       toast('Não consegui carregar PDF/MP3. Confira permissões e nomes dos arquivos.');
     }
   }
+}
+
+function getDrivePreviewUrl(fileId){
+  return `https://drive.google.com/file/d/${fileId}/preview`;
 }
 
 async function getAuthorizedFileObjectUrl(fileId, kind){
