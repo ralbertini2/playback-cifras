@@ -71,6 +71,7 @@
 
       <section id="viewer" class="viewer">
         <iframe id="pdfFrame" title="Cifra PDF"></iframe>
+        <div id="pdfScroll" class="pdf-scroll" aria-label="Cifra PDF em modo rolagem"></div>
         <div id="emptyState" class="empty-state">
           <h2>Nenhuma música carregada</h2>
           <p>Entre com Google e selecione a pasta principal do repertório. O app lembra a pasta neste dispositivo e atualiza automaticamente ao abrir.</p>
@@ -91,6 +92,7 @@
   <script src="config.js"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="https://apis.google.com/js/api.js" async defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

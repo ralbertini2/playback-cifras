@@ -22,6 +22,8 @@ let gisReady = false;
 let gapiReady = false;
 let currentAudioObjectUrl = '';
 let currentPdfObjectUrl = '';
+let pdfRenderSeq = 0;
+let currentPdfMode = 'preview';
 let audioLoadSeq = 0;
 let autoScrollTimer = null;
 let autoScrollSpeed = 1;
@@ -29,6 +31,9 @@ let autoScrollSpeed = 1;
 window.addEventListener('DOMContentLoaded', init);
 
 function init(){
+  if(window.pdfjsLib){
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
   bindEls();
   bindEvents();
   restoreUi();
@@ -37,7 +42,7 @@ function init(){
 }
 
 function bindEls(){
-  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast','favoriteBtn','playlistSelect','newPlaylistBtn','addPlaylistBtn','deletePlaylistBtn','autoScrollBtn','speedDownBtn','speedUpBtn','speedLabel'].forEach(id=>els[id]=document.getElementById(id));
+  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','pdfScroll','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast','favoriteBtn','playlistSelect','newPlaylistBtn','addPlaylistBtn','deletePlaylistBtn','autoScrollBtn','speedDownBtn','speedUpBtn','speedLabel'].forEach(id=>els[id]=document.getElementById(id));
 }
 
 function bindEvents(){
@@ -320,7 +325,7 @@ async function loadSong(index, autoplay=false){
     const pdfUrl = getDrivePreviewUrl(song.pdfId);
     const audioUrl = await getAuthorizedFileObjectUrl(song.mp3Id, 'audio');
     if(seq !== audioLoadSeq) return;
-    els.pdfFrame.src = pdfUrl;
+    setPreviewPdf(pdfUrl);
     els.audio.src = audioUrl;
     els.audio.load();
     els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
@@ -373,11 +378,30 @@ function resetAudioSource(){
 }
 
 function resetPdfSource(){
+  pdfRenderSeq++;
+  currentPdfMode = 'preview';
   els.pdfFrame.removeAttribute('src');
+  if(els.pdfScroll){
+    els.pdfScroll.classList.remove('active');
+    els.pdfScroll.innerHTML = '';
+  }
+  const viewer = document.getElementById('viewer');
+  if(viewer) viewer.classList.remove('scroll-mode');
   if(currentPdfObjectUrl){
     URL.revokeObjectURL(currentPdfObjectUrl);
     currentPdfObjectUrl = '';
   }
+}
+
+function setPreviewPdf(url){
+  currentPdfMode = 'preview';
+  const viewer = document.getElementById('viewer');
+  if(viewer) viewer.classList.remove('scroll-mode');
+  if(els.pdfScroll){
+    els.pdfScroll.classList.remove('active');
+    els.pdfScroll.innerHTML = '';
+  }
+  els.pdfFrame.src = url;
 }
 
 function clearCurrent(){
@@ -519,17 +543,25 @@ function toggleAutoScroll(){
   if(autoScrollTimer) { stopAutoScroll(true); return; }
   startAutoScroll();
 }
-function startAutoScroll(){
-  if(!filteredSongs[currentIndex]) { toast('Carregue uma música primeiro.'); return; }
+async function startAutoScroll(){
+  const song = filteredSongs[currentIndex];
+  if(!song) { toast('Carregue uma música primeiro.'); return; }
   stopAutoScroll(false);
+  try{
+    await ensureScrollablePdf(song);
+  }catch(err){
+    console.error(err);
+    toast('Não consegui preparar a rolagem automática deste PDF.');
+    return;
+  }
   els.autoScrollBtn.textContent = '⏸ Rolagem';
   autoScrollTimer = setInterval(()=>{
-    try{
-      const win = els.pdfFrame.contentWindow;
-      if(win) win.scrollBy(0, autoScrollSpeed);
-    }catch(e){
-      // fallback: tenta rolar o próprio elemento no Safari/iPad
-      els.pdfFrame.scrollTop = (els.pdfFrame.scrollTop || 0) + autoScrollSpeed;
+    const target = els.pdfScroll;
+    if(!target) return;
+    target.scrollTop += autoScrollSpeed;
+    if(target.scrollTop + target.clientHeight >= target.scrollHeight - 2){
+      stopAutoScroll(false);
+      toast('Fim da cifra.');
     }
   }, 80);
 }
@@ -537,6 +569,49 @@ function stopAutoScroll(showToast=true){
   if(autoScrollTimer){ clearInterval(autoScrollTimer); autoScrollTimer=null; }
   if(els.autoScrollBtn) els.autoScrollBtn.textContent = '▶ Rolagem';
   if(showToast) toast('Rolagem pausada.');
+}
+
+async function ensureScrollablePdf(song){
+  if(!window.pdfjsLib) throw new Error('PDF.js não carregou.');
+  if(currentPdfMode === 'scroll' && els.pdfScroll?.dataset.fileId === song.pdfId) return;
+  currentPdfMode = 'scroll';
+  const seq = ++pdfRenderSeq;
+  const viewer = document.getElementById('viewer');
+  if(viewer) viewer.classList.add('scroll-mode');
+  els.pdfScroll.classList.add('active');
+  els.pdfScroll.dataset.fileId = song.pdfId;
+  els.pdfScroll.innerHTML = '<div class="pdf-loading">Preparando rolagem automática...</div>';
+
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${song.pdfId}?alt=media`, {headers: authHeaders()});
+  if(!res.ok) throw new Error('Erro ao baixar PDF para rolagem.');
+  const data = await res.arrayBuffer();
+  if(seq !== pdfRenderSeq) return;
+
+  const pdf = await pdfjsLib.getDocument({data}).promise;
+  if(seq !== pdfRenderSeq) return;
+  els.pdfScroll.innerHTML = '';
+  els.pdfScroll.scrollTop = 0;
+
+  for(let pageNum=1; pageNum<=pdf.numPages; pageNum++){
+    if(seq !== pdfRenderSeq) return;
+    const page = await pdf.getPage(pageNum);
+    const baseViewport = page.getViewport({scale:1});
+    const availableWidth = Math.max(320, els.pdfScroll.clientWidth - 24);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssScale = availableWidth / baseViewport.width;
+    const renderViewport = page.getViewport({scale: cssScale * dpr});
+    const cssViewport = page.getViewport({scale: cssScale});
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'pdf-page';
+    canvas.width = Math.floor(renderViewport.width);
+    canvas.height = Math.floor(renderViewport.height);
+    canvas.style.width = `${Math.floor(cssViewport.width)}px`;
+    canvas.style.height = `${Math.floor(cssViewport.height)}px`;
+    els.pdfScroll.appendChild(canvas);
+    const ctx = canvas.getContext('2d', {alpha:false});
+    await page.render({canvasContext:ctx, viewport:renderViewport}).promise;
+  }
 }
 function changeScrollSpeed(delta){
   autoScrollSpeed = Math.max(1, Math.min(12, autoScrollSpeed + delta));
