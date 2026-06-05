@@ -16,6 +16,8 @@ let currentIndex = -1;
 let pickerReady = false;
 let gisReady = false;
 let gapiReady = false;
+let currentAudioObjectUrl = '';
+let audioLoadSeq = 0;
 
 window.addEventListener('DOMContentLoaded', init);
 
@@ -206,18 +208,61 @@ function renderSongs(){
   els.songList.querySelectorAll('.song-item').forEach(el=>el.addEventListener('click',()=>{loadSong(Number(el.dataset.index), true); els.sidebar.classList.remove('open');}));
 }
 
-function loadSong(index, autoplay=false){
+async function loadSong(index, autoplay=false){
   if(index<0 || index>=filteredSongs.length) return;
   currentIndex=index;
+  const seq = ++audioLoadSeq;
   const song = filteredSongs[index];
+
   els.songTitle.textContent = song.title;
-  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
+  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • carregando MP3...`;
   els.pdfFrame.src = song.pdfUrl;
-  els.audio.src = song.mp3Url;
-  els.audio.setAttribute('crossorigin','anonymous');
   els.emptyState.style.display = 'none';
   renderSongs();
-  if(autoplay) setTimeout(()=>els.audio.play().catch(()=>{}),250);
+
+  resetAudioSource();
+
+  try{
+    const audioUrl = await getAuthorizedAudioUrl(song.mp3Id);
+    if(seq !== audioLoadSeq) return;
+    els.audio.src = audioUrl;
+    els.audio.load();
+    els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
+    if(autoplay){
+      setTimeout(()=>els.audio.play().catch(()=>{}),250);
+    }
+  }catch(err){
+    console.error(err);
+    if(seq === audioLoadSeq){
+      els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • erro ao carregar MP3`;
+      toast('Não consegui carregar o MP3. Confira permissões e nome do arquivo.');
+    }
+  }
+}
+
+async function getAuthorizedAudioUrl(fileId){
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: authHeaders()
+  });
+  if(!res.ok){
+    const txt = await res.text();
+    throw new Error(`Erro ao baixar MP3 ${res.status}: ${txt}`);
+  }
+  const blob = await res.blob();
+  if(currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
+  currentAudioObjectUrl = URL.createObjectURL(blob);
+  return currentAudioObjectUrl;
+}
+
+function resetAudioSource(){
+  els.audio.pause();
+  els.audio.removeAttribute('src');
+  els.audio.load();
+  els.playBtn.textContent='▶';
+  if(currentAudioObjectUrl){
+    URL.revokeObjectURL(currentAudioObjectUrl);
+    currentAudioObjectUrl = '';
+  }
 }
 
 function clearCurrent(){
@@ -225,7 +270,7 @@ function clearCurrent(){
   els.songTitle.textContent = library.length ? 'Nenhuma música neste filtro' : 'Nenhuma música carregada';
   els.songMeta.textContent = '';
   els.pdfFrame.removeAttribute('src');
-  els.audio.removeAttribute('src');
+  resetAudioSource();
   els.emptyState.style.display = 'grid';
 }
 
