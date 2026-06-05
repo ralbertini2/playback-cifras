@@ -17,6 +17,7 @@ let pickerReady = false;
 let gisReady = false;
 let gapiReady = false;
 let currentAudioObjectUrl = '';
+let currentPdfObjectUrl = '';
 let audioLoadSeq = 0;
 
 window.addEventListener('DOMContentLoaded', init);
@@ -112,7 +113,18 @@ function authHeaders(){ return {Authorization:`Bearer ${accessToken}`}; }
 
 async function driveList(params){
   const url = new URL(DRIVE_FILES);
-  Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));
+  Object.entries(params).forEach(([k,v])=>{ if(v!==undefined && v!==null && v!=='') url.searchParams.set(k,v); });
+  const res = await fetch(url.toString(), {headers:authHeaders()});
+  if(!res.ok){
+    const txt = await res.text();
+    throw new Error(`Erro Drive ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
+
+async function driveGet(fileId, fields='id,name,mimeType'){
+  const url = new URL(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`);
+  url.searchParams.set('fields', fields);
   const res = await fetch(url.toString(), {headers:authHeaders()});
   if(!res.ok){
     const txt = await res.text();
@@ -134,18 +146,35 @@ async function listAll(params){
 async function refreshLibrary(silent=false){
   if(!ensureLogin()) return;
   const rootId = extractFolderId(els.folderIdInput.value.trim());
-  if(!rootId){ toast('Informe ou selecione a pasta principal.'); return; }
+  if(!rootId){ toast('Informe ou selecione uma pasta do Drive.'); return; }
   els.folderIdInput.value = rootId;
   localStorage.setItem(STORAGE.folder, rootId);
   if(!silent) toast('Atualizando biblioteca...');
   try{
+    const root = await driveGet(rootId, 'id,name,mimeType');
+    if(root.mimeType !== 'application/vnd.google-apps.folder'){
+      toast('O ID informado não é de uma pasta do Drive.');
+      return;
+    }
+
+    const result=[];
+
+    // Cenário B: a própria pasta escolhida já contém PDFs e MP3s.
+    const rootFiles = await listAll({
+      q: `'${rootId}' in parents and trashed=false and (mimeType='application/pdf' or mimeType='audio/mpeg' or name contains '.mp3')`,
+      fields:'nextPageToken, files(id,name,mimeType,webViewLink,webContentLink)',
+      orderBy:'name',
+      pageSize:'1000'
+    });
+    result.push(...pairFiles({id:root.id, name:root.name}, rootFiles));
+
+    // Cenário A: a pasta principal contém subpastas por estilo.
     const styles = await listAll({
       q: `'${rootId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
       fields:'nextPageToken, files(id,name,mimeType)',
       orderBy:'name',
       pageSize:'1000'
     });
-    const result=[];
     for(const style of styles){
       const files = await listAll({
         q: `'${style.id}' in parents and trashed=false and (mimeType='application/pdf' or mimeType='audio/mpeg' or name contains '.mp3')`,
@@ -155,14 +184,29 @@ async function refreshLibrary(silent=false){
       });
       result.push(...pairFiles(style, files));
     }
-    library = result.sort((a,b)=>a.style.localeCompare(b.style,'pt-BR') || a.title.localeCompare(b.title,'pt-BR'));
+
+    library = dedupeSongs(result).sort((a,b)=>a.style.localeCompare(b.style,'pt-BR') || a.title.localeCompare(b.title,'pt-BR'));
     renderStyles();
     applyFilters();
-    toast(`Biblioteca atualizada: ${library.length} música(s).`);
+    if(library.length){
+      toast(`Biblioteca atualizada: ${library.length} música(s).`);
+    }else{
+      toast('Nenhum par PDF + MP3 encontrado. Confira se os nomes dos arquivos são iguais.');
+    }
   }catch(err){
     console.error(err);
     toast('Erro ao acessar o Drive. Confira a pasta e as permissões.');
   }
+}
+
+function dedupeSongs(songs){
+  const seen = new Set();
+  return songs.filter(song=>{
+    const key = `${song.styleId}|${song.title}`;
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function pairFiles(style, files){
@@ -171,8 +215,9 @@ function pairFiles(style, files){
     const ext = getExt(file.name);
     if(ext !== 'pdf' && ext !== 'mp3') continue;
     const base = normalizeBase(file.name);
-    if(!map.has(base)) map.set(base,{title:base,style:style.name,styleId:style.id});
-    const item = map.get(base);
+    const key = normalizeMatchKey(base);
+    if(!map.has(key)) map.set(key,{title:base,style:style.name,styleId:style.id});
+    const item = map.get(key);
     if(ext==='pdf') item.pdf = file;
     if(ext==='mp3') item.mp3 = file;
   }
@@ -182,7 +227,7 @@ function pairFiles(style, files){
     styleId:x.styleId,
     pdfId:x.pdf.id,
     mp3Id:x.mp3.id,
-    pdfUrl:`https://drive.google.com/file/d/${x.pdf.id}/preview`,
+    pdfUrl:`https://www.googleapis.com/drive/v3/files/${x.pdf.id}?alt=media`,
     mp3Url:`https://www.googleapis.com/drive/v3/files/${x.mp3.id}?alt=media`
   }));
 }
@@ -215,16 +260,20 @@ async function loadSong(index, autoplay=false){
   const song = filteredSongs[index];
 
   els.songTitle.textContent = song.title;
-  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • carregando MP3...`;
-  els.pdfFrame.src = song.pdfUrl;
+  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • carregando arquivos...`;
   els.emptyState.style.display = 'none';
   renderSongs();
 
   resetAudioSource();
+  resetPdfSource();
 
   try{
-    const audioUrl = await getAuthorizedAudioUrl(song.mp3Id);
+    const [pdfUrl, audioUrl] = await Promise.all([
+      getAuthorizedFileObjectUrl(song.pdfId, 'pdf'),
+      getAuthorizedFileObjectUrl(song.mp3Id, 'audio')
+    ]);
     if(seq !== audioLoadSeq) return;
+    els.pdfFrame.src = pdfUrl;
     els.audio.src = audioUrl;
     els.audio.load();
     els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
@@ -234,24 +283,30 @@ async function loadSong(index, autoplay=false){
   }catch(err){
     console.error(err);
     if(seq === audioLoadSeq){
-      els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • erro ao carregar MP3`;
-      toast('Não consegui carregar o MP3. Confira permissões e nome do arquivo.');
+      els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • erro ao carregar arquivos`;
+      toast('Não consegui carregar PDF/MP3. Confira permissões e nomes dos arquivos.');
     }
   }
 }
 
-async function getAuthorizedAudioUrl(fileId){
+async function getAuthorizedFileObjectUrl(fileId, kind){
   const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
     headers: authHeaders()
   });
   if(!res.ok){
     const txt = await res.text();
-    throw new Error(`Erro ao baixar MP3 ${res.status}: ${txt}`);
+    throw new Error(`Erro ao baixar arquivo ${res.status}: ${txt}`);
   }
   const blob = await res.blob();
-  if(currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
-  currentAudioObjectUrl = URL.createObjectURL(blob);
-  return currentAudioObjectUrl;
+  const url = URL.createObjectURL(blob);
+  if(kind === 'audio'){
+    if(currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
+    currentAudioObjectUrl = url;
+  }else{
+    if(currentPdfObjectUrl) URL.revokeObjectURL(currentPdfObjectUrl);
+    currentPdfObjectUrl = url;
+  }
+  return url;
 }
 
 function resetAudioSource(){
@@ -265,11 +320,19 @@ function resetAudioSource(){
   }
 }
 
+function resetPdfSource(){
+  els.pdfFrame.removeAttribute('src');
+  if(currentPdfObjectUrl){
+    URL.revokeObjectURL(currentPdfObjectUrl);
+    currentPdfObjectUrl = '';
+  }
+}
+
 function clearCurrent(){
   currentIndex=-1;
   els.songTitle.textContent = library.length ? 'Nenhuma música neste filtro' : 'Nenhuma música carregada';
   els.songMeta.textContent = '';
-  els.pdfFrame.removeAttribute('src');
+  resetPdfSource();
   resetAudioSource();
   els.emptyState.style.display = 'grid';
 }
@@ -333,6 +396,7 @@ function extractFolderId(value){
 }
 function getExt(name){ return (name.split('.').pop()||'').toLowerCase(); }
 function normalizeBase(name){ return name.replace(/\.[^.]+$/,'').trim(); }
+function normalizeMatchKey(name){ return removeAccents(normalizeBase(name).toLowerCase()).replace(/\s+/g,' ').trim(); }
 function removeAccents(s){ return s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function toast(msg){

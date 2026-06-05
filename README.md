@@ -29,7 +29,13 @@ GOOGLE_CLIENT_ID: "SEU_CLIENT_ID.apps.googleusercontent.com"
 `GOOGLE_API_KEY` é opcional, mas pode ser necessário para o seletor visual de pasta do Google Drive em alguns navegadores. Se não configurar API Key, o usuário ainda pode colar o ID da pasta manualmente.
 
 
-## Versão V4
+## Versão V5
 - Corrige cache do `config.js` no PWA.
 - Carrega o MP3 pelo Google Drive usando autorização OAuth e cria um áudio local temporário para o player.
 - Chama `audio.load()` automaticamente ao trocar de música.
+
+
+## V6
+- Aceita selecionar a pasta principal com estilos ou uma subpasta direta com músicas.
+- Carrega PDF e MP3 privados via Google Drive API autenticada.
+- Mantém config.js fora do cache.
