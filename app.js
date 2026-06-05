@@ -24,6 +24,9 @@ let gisReady = false;
 let gapiReady = false;
 let currentAudioObjectUrl = '';
 let currentPdfObjectUrl = '';
+const FILE_CACHE_NAME = 'playback-cifras-drive-files-v1';
+const objectUrlCache = new Map();
+const prefetchingFiles = new Set();
 let pdfRenderSeq = 0;
 let currentPdfMode = 'preview';
 let audioLoadSeq = 0;
@@ -262,15 +265,16 @@ async function refreshLibrary(silent=false){
       orderBy:'name',
       pageSize:'1000'
     });
-    for(const style of styles){
+    const styleResults = await Promise.all(styles.map(async style=>{
       const files = await listAll({
         q: `'${style.id}' in parents and trashed=false and (mimeType='application/pdf' or mimeType='audio/mpeg' or name contains '.mp3')`,
         fields:'nextPageToken, files(id,name,mimeType,webViewLink,webContentLink)',
         orderBy:'name',
         pageSize:'1000'
       });
-      result.push(...pairFiles(style, files));
-    }
+      return pairFiles(style, files);
+    }));
+    for(const songs of styleResults) result.push(...songs);
 
     library = dedupeSongs(result).sort((a,b)=>a.style.localeCompare(b.style,'pt-BR') || a.title.localeCompare(b.title,'pt-BR'));
     localStorage.setItem(STORAGE.library, JSON.stringify(library));
@@ -370,7 +374,7 @@ async function loadSong(index, autoplay=false){
   const song = filteredSongs[index];
 
   els.songTitle.textContent = song.title;
-  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • carregando arquivos...`;
+  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • abrindo PDF...`;
   updateFavoriteButton();
   stopAutoScroll(false);
   els.emptyState.style.display = 'none';
@@ -380,25 +384,26 @@ async function loadSong(index, autoplay=false){
   resetPdfSource();
 
   try{
-    // PDF: usar o preview nativo do Google Drive.
-    // Isso carrega progressivamente, mostra todas as páginas e mantém o zoom/pinch do visualizador,
-    // evitando baixar o PDF inteiro como blob antes de exibir.
-    const pdfUrl = getDrivePreviewUrl(song.pdfId);
+    // O PDF aparece imediatamente pelo preview do Drive. Antes, o app esperava o MP3 baixar
+    // para só então exibir o PDF; isso deixava a troca de música com sensação de lentidão.
+    setPreviewPdf(getDrivePreviewUrl(song.pdfId));
+    els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • preparando áudio...`;
+
     const audioUrl = await getAuthorizedFileObjectUrl(song.mp3Id, 'audio');
     if(seq !== audioLoadSeq) return;
-    setPreviewPdf(pdfUrl);
     els.audio.src = audioUrl;
     els.audio.load();
     els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
     if(autoplay){
-      setTimeout(()=>els.audio.play().catch(()=>{}),250);
+      setTimeout(()=>els.audio.play().catch(()=>{}),180);
     }
     updateFavoriteButton();
+    prefetchAround(index);
   }catch(err){
     console.error(err);
     if(seq === audioLoadSeq){
-      els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • erro ao carregar arquivos`;
-      toast('Não consegui carregar PDF/MP3. Confira permissões e nomes dos arquivos.');
+      els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length} • erro ao carregar áudio`;
+      toast('PDF aberto. Não consegui carregar o MP3. Confira permissões e conexão.');
     }
   }
 }
@@ -408,21 +413,72 @@ function getDrivePreviewUrl(fileId){
 }
 
 async function getAuthorizedFileObjectUrl(fileId, kind){
+  const cached = objectUrlCache.get(fileId);
+  if(cached){
+    cached.usedAt = Date.now();
+    return cached.url;
+  }
+
+  const blob = await getDriveBlobCached(fileId);
+  const url = URL.createObjectURL(blob);
+  objectUrlCache.set(fileId, {url, kind, usedAt:Date.now()});
+  trimObjectUrlCache();
+  return url;
+}
+
+async function getDriveBlobCached(fileId){
+  const cacheKey = new Request(`${location.origin}${location.pathname.replace(/[^/]*$/, '')}__drive_file_cache__/${encodeURIComponent(fileId)}`);
+
+  if('caches' in window){
+    try{
+      const cache = await caches.open(FILE_CACHE_NAME);
+      const cached = await cache.match(cacheKey);
+      if(cached) return await cached.blob();
+    }catch(err){ console.warn('Cache local indisponível:', err); }
+  }
+
   const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
   if(!res.ok){
     const txt = await res.text();
     throw new Error(`Erro ao baixar arquivo ${res.status}: ${txt}`);
   }
   const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  if(kind === 'audio'){
-    if(currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
-    currentAudioObjectUrl = url;
-  }else{
-    if(currentPdfObjectUrl) URL.revokeObjectURL(currentPdfObjectUrl);
-    currentPdfObjectUrl = url;
+
+  if('caches' in window){
+    try{
+      const cache = await caches.open(FILE_CACHE_NAME);
+      cache.put(cacheKey, new Response(blob, {headers:{'Content-Type': blob.type || 'application/octet-stream'}}));
+    }catch(err){ console.warn('Não consegui salvar arquivo no cache local:', err); }
   }
-  return url;
+  return blob;
+}
+
+function trimObjectUrlCache(){
+  const max = 6;
+  if(objectUrlCache.size <= max) return;
+  const entries = [...objectUrlCache.entries()].sort((a,b)=>a[1].usedAt-b[1].usedAt);
+  while(objectUrlCache.size > max && entries.length){
+    const [fileId, item] = entries.shift();
+    try{ URL.revokeObjectURL(item.url); }catch{}
+    objectUrlCache.delete(fileId);
+  }
+}
+
+function prefetchAround(index){
+  const candidates = [filteredSongs[index+1], filteredSongs[index+2]].filter(Boolean);
+  for(const song of candidates){
+    prefetchFile(song.mp3Id);
+    // Também deixa o PDF pronto para rolagem/zoom interno quando o usuário usar esses controles.
+    prefetchFile(song.pdfId);
+  }
+}
+
+function prefetchFile(fileId){
+  if(!fileId || objectUrlCache.has(fileId) || prefetchingFiles.has(fileId)) return;
+  prefetchingFiles.add(fileId);
+  getDriveBlobCached(fileId)
+    .catch(()=>{})
+    .finally(()=>prefetchingFiles.delete(fileId));
 }
 
 function resetAudioSource(){
@@ -430,10 +486,6 @@ function resetAudioSource(){
   els.audio.removeAttribute('src');
   els.audio.load();
   els.playBtn.textContent='▶';
-  if(currentAudioObjectUrl){
-    URL.revokeObjectURL(currentAudioObjectUrl);
-    currentAudioObjectUrl = '';
-  }
 }
 
 function resetPdfSource(){
@@ -642,9 +694,8 @@ async function ensureScrollablePdf(song, forceRender=false){
   els.pdfScroll.dataset.zoom = String(pdfZoom);
   els.pdfScroll.innerHTML = '<div class="pdf-loading">Preparando rolagem automática...</div>';
 
-  const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${song.pdfId}?alt=media`);
-  if(!res.ok) throw new Error('Erro ao baixar PDF para rolagem.');
-  const data = await res.arrayBuffer();
+  const blob = await getDriveBlobCached(song.pdfId);
+  const data = await blob.arrayBuffer();
   if(seq !== pdfRenderSeq) return;
 
   const pdf = await pdfjsLib.getDocument({data}).promise;
