@@ -1,21 +1,29 @@
-# Playback Cifras Drive PWA
+# Playback Cifras PWA
 
-Estrutura recomendada no Google Drive:
+Sistema web para tocar playbacks MP3 sincronizados com cifras em PDF armazenadas no Google Drive.
 
+## Estrutura esperada no Google Drive
+
+Uma pasta principal com subpastas por estilo:
+
+```text
+Repertório Playback
+├── Rock
+│   ├── Fear of the Dark.pdf
+│   └── Fear of the Dark.mp3
+├── Sertanejo
+│   ├── Evidências.pdf
+│   └── Evidências.mp3
 ```
-Repertorio Playback/
-  Sertanejo/
-    Evidências.pdf
-    Evidências.mp3
-  Rock/
-    Tempo Perdido.pdf
-    Tempo Perdido.mp3
-```
 
-Cada subpasta vira um estilo musical. O app combina PDF e MP3 pelo mesmo nome.
+O PDF e o MP3 precisam ter o mesmo nome, mudando apenas a extensão.
 
 ## Configuração
 
-Edite `config.js` e coloque seu `GOOGLE_CLIENT_ID`.
+Edite `config.js` e coloque seu Client ID do Google:
 
-Também é possível deixar `ROOT_FOLDER_ID` vazio e colar o ID da pasta principal na tela do app.
+```js
+GOOGLE_CLIENT_ID: "SEU_CLIENT_ID.apps.googleusercontent.com"
+```
+
+`GOOGLE_API_KEY` é opcional, mas pode ser necessário para o seletor visual de pasta do Google Drive em alguns navegadores. Se não configurar API Key, o usuário ainda pode colar o ID da pasta manualmente.

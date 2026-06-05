@@ -1,154 +1,298 @@
-const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
-let tokenClient, accessToken = null;
-let library = [], currentStyle = 'Todos', filteredSongs = [], currentIndex = 0;
-let objectUrls = [];
-
-const $ = (id) => document.getElementById(id);
-const els = {
-  loginBtn:$('loginBtn'), syncBtn:$('syncBtn'), rootFolderInput:$('rootFolderInput'),
-  styleSelect:$('styleSelect'), searchInput:$('searchInput'), songList:$('songList'),
-  songTitle:$('songTitle'), songMeta:$('songMeta'), pdfFrame:$('pdfFrame'), audio:$('audio'),
-  prevBtn:$('prevBtn'), nextBtn:$('nextBtn'), playBtn:$('playBtn'), fullscreenBtn:$('fullscreenBtn'), toast:$('toast')
+const SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
+const DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files';
+const STORAGE = {
+  token: 'pc_token',
+  folder: 'pc_root_folder_id',
+  style: 'pc_selected_style',
+  stage: 'pc_stage_mode'
 };
 
-function toast(msg){ els.toast.textContent=msg; els.toast.style.display='block'; setTimeout(()=>els.toast.style.display='none',3500); }
-function normalizeName(name){ return name.replace(/\.[^.]+$/,'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
-function fileExt(name){ return (name.split('.').pop()||'').toLowerCase(); }
-function revokeUrls(){ objectUrls.forEach(URL.revokeObjectURL); objectUrls=[]; }
+const els = {};
+let tokenClient;
+let accessToken = '';
+let library = [];
+let filteredSongs = [];
+let currentIndex = -1;
+let pickerReady = false;
+let gisReady = false;
+let gapiReady = false;
 
-window.onload = () => {
-  els.rootFolderInput.value = localStorage.getItem('rootFolderId') || window.APP_CONFIG.ROOT_FOLDER_ID || '';
-  initGoogle();
+window.addEventListener('DOMContentLoaded', init);
+
+function init(){
+  bindEls();
   bindEvents();
-};
+  restoreUi();
+  registerSW();
+  waitForGoogleLibs();
+}
 
-function initGoogle(){
-  const wait = setInterval(()=>{
-    if(window.google?.accounts?.oauth2){
-      clearInterval(wait);
-      tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: window.APP_CONFIG.GOOGLE_CLIENT_ID,
-        scope: SCOPE,
-        callback: (resp) => {
-          if(resp.error){ toast('Erro no login Google.'); return; }
-          accessToken = resp.access_token;
-          els.loginBtn.textContent = 'Google conectado';
-          toast('Google Drive conectado.');
-        }
-      });
-    }
-  },150);
+function bindEls(){
+  ['googleBtn','loginStatus','folderIdInput','pickFolderBtn','refreshBtn','clearFolderBtn','styleSelect','searchInput','songList','songTitle','songMeta','pdfFrame','emptyState','audio','prevBtn','nextBtn','playBtn','stageBtn','fullscreenBtn','sidebar','toggleSidebar','showSidebar','toast'].forEach(id=>els[id]=document.getElementById(id));
 }
 
 function bindEvents(){
-  els.loginBtn.onclick = () => tokenClient?.requestAccessToken({prompt:'consent'});
-  els.syncBtn.onclick = syncLibrary;
-  els.styleSelect.onchange = () => { currentStyle=els.styleSelect.value; applyFilters(); };
-  els.searchInput.oninput = applyFilters;
-  els.prevBtn.onclick = () => go(-1);
-  els.nextBtn.onclick = () => go(1);
-  els.playBtn.onclick = () => els.audio.paused ? els.audio.play() : els.audio.pause();
-  els.audio.onplay = () => els.playBtn.textContent = '⏸';
-  els.audio.onpause = () => els.playBtn.textContent = '▶';
-  els.fullscreenBtn.onclick = () => document.documentElement.requestFullscreen?.();
-  document.addEventListener('keydown', e => {
-    if(e.key === 'ArrowRight') go(1);
-    if(e.key === 'ArrowLeft') go(-1);
-    if(e.code === 'Space'){ e.preventDefault(); els.playBtn.click(); }
+  els.googleBtn.addEventListener('click', login);
+  els.pickFolderBtn.addEventListener('click', openPicker);
+  els.refreshBtn.addEventListener('click', refreshLibrary);
+  els.clearFolderBtn.addEventListener('click', clearFolder);
+  els.styleSelect.addEventListener('change',()=>{localStorage.setItem(STORAGE.style,els.styleSelect.value);applyFilters();});
+  els.searchInput.addEventListener('input', applyFilters);
+  els.prevBtn.addEventListener('click', prevSong);
+  els.nextBtn.addEventListener('click', nextSong);
+  els.playBtn.addEventListener('click', togglePlay);
+  els.stageBtn.addEventListener('click', toggleStage);
+  els.fullscreenBtn.addEventListener('click', fullscreen);
+  els.showSidebar.addEventListener('click',()=>els.sidebar.classList.add('open'));
+  els.toggleSidebar.addEventListener('click',()=>els.sidebar.classList.remove('open'));
+  els.audio.addEventListener('play',()=>els.playBtn.textContent='⏸');
+  els.audio.addEventListener('pause',()=>els.playBtn.textContent='▶');
+  document.addEventListener('keydown', keyboard);
+}
+
+function restoreUi(){
+  const savedFolder = localStorage.getItem(STORAGE.folder) || window.APP_CONFIG?.ROOT_FOLDER_ID || '';
+  els.folderIdInput.value = savedFolder;
+  if(localStorage.getItem(STORAGE.stage)==='1') document.body.classList.add('stage');
+  updateStageBtn();
+}
+
+function registerSW(){
+  if('serviceWorker' in navigator){navigator.serviceWorker.register('./service-worker.js').catch(()=>{});}
+}
+
+function waitForGoogleLibs(){
+  const timer=setInterval(()=>{
+    if(window.google?.accounts?.oauth2 && !gisReady){
+      gisReady=true;
+      setupTokenClient();
+    }
+    if(window.gapi && !gapiReady){
+      gapiReady=true;
+      gapi.load('picker',()=>{pickerReady=true;});
+    }
+    if(gisReady && gapiReady) clearInterval(timer);
+  },200);
+}
+
+function setupTokenClient(){
+  const clientId = window.APP_CONFIG?.GOOGLE_CLIENT_ID || '';
+  if(!clientId || clientId.includes('COLE_SEU_CLIENT_ID')){
+    els.loginStatus.textContent = 'Configure o GOOGLE_CLIENT_ID em config.js';
+    return;
+  }
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: SCOPES,
+    callback: async (resp)=>{
+      if(resp.error){ toast('Erro no login: '+resp.error); return; }
+      accessToken = resp.access_token;
+      localStorage.setItem(STORAGE.token, accessToken);
+      els.loginStatus.textContent = 'Google conectado';
+      els.googleBtn.textContent = 'Google conectado';
+      if(els.folderIdInput.value.trim()) await refreshLibrary(true);
+    }
   });
 }
 
-async function driveList(folderId){
-  const q = `'${folderId}' in parents and trashed=false`;
-  const fields = 'files(id,name,mimeType,modifiedTime),nextPageToken';
-  let files=[], pageToken='';
+function login(){
+  if(!tokenClient){ toast('Login ainda não carregou. Tente novamente.'); return; }
+  tokenClient.requestAccessToken({prompt:'consent'});
+}
+
+function ensureLogin(){
+  if(accessToken) return true;
+  toast('Entre com Google primeiro.');
+  return false;
+}
+
+function authHeaders(){ return {Authorization:`Bearer ${accessToken}`}; }
+
+async function driveList(params){
+  const url = new URL(DRIVE_FILES);
+  Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));
+  const res = await fetch(url.toString(), {headers:authHeaders()});
+  if(!res.ok){
+    const txt = await res.text();
+    throw new Error(`Erro Drive ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
+
+async function listAll(params){
+  let files=[]; let pageToken='';
   do{
-    const url = new URL('https://www.googleapis.com/drive/v3/files');
-    url.searchParams.set('q', q);
-    url.searchParams.set('fields', fields);
-    url.searchParams.set('pageSize','1000');
-    if(pageToken) url.searchParams.set('pageToken', pageToken);
-    const res = await fetch(url, {headers:{Authorization:`Bearer ${accessToken}`}});
-    if(!res.ok) throw new Error('Falha ao ler pasta do Drive');
-    const data = await res.json();
+    const data = await driveList({...params, pageToken});
     files = files.concat(data.files || []);
     pageToken = data.nextPageToken || '';
-  } while(pageToken);
+  }while(pageToken);
   return files;
 }
 
-async function fetchFileBlob(fileId){
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {headers:{Authorization:`Bearer ${accessToken}`}});
-  if(!res.ok) throw new Error('Falha ao baixar arquivo');
-  return await res.blob();
+async function refreshLibrary(silent=false){
+  if(!ensureLogin()) return;
+  const rootId = extractFolderId(els.folderIdInput.value.trim());
+  if(!rootId){ toast('Informe ou selecione a pasta principal.'); return; }
+  els.folderIdInput.value = rootId;
+  localStorage.setItem(STORAGE.folder, rootId);
+  if(!silent) toast('Atualizando biblioteca...');
+  try{
+    const styles = await listAll({
+      q: `'${rootId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields:'nextPageToken, files(id,name,mimeType)',
+      orderBy:'name',
+      pageSize:'1000'
+    });
+    const result=[];
+    for(const style of styles){
+      const files = await listAll({
+        q: `'${style.id}' in parents and trashed=false and (mimeType='application/pdf' or mimeType='audio/mpeg' or name contains '.mp3')`,
+        fields:'nextPageToken, files(id,name,mimeType,webViewLink,webContentLink)',
+        orderBy:'name',
+        pageSize:'1000'
+      });
+      result.push(...pairFiles(style, files));
+    }
+    library = result.sort((a,b)=>a.style.localeCompare(b.style,'pt-BR') || a.title.localeCompare(b.title,'pt-BR'));
+    renderStyles();
+    applyFilters();
+    toast(`Biblioteca atualizada: ${library.length} música(s).`);
+  }catch(err){
+    console.error(err);
+    toast('Erro ao acessar o Drive. Confira a pasta e as permissões.');
+  }
 }
 
-async function syncLibrary(){
-  if(!accessToken){ toast('Primeiro entre com Google.'); return; }
-  const rootId = els.rootFolderInput.value.trim();
-  if(!rootId){ toast('Cole o ID da pasta principal do Drive.'); return; }
-  localStorage.setItem('rootFolderId', rootId);
-  toast('Atualizando biblioteca...');
-  try{
-    const rootFiles = await driveList(rootId);
-    const styleFolders = rootFiles.filter(f=>f.mimeType==='application/vnd.google-apps.folder').sort((a,b)=>a.name.localeCompare(b.name));
-    const songs=[];
-    for(const style of styleFolders){
-      const files = await driveList(style.id);
-      const byBase = new Map();
-      for(const f of files){
-        const ext = fileExt(f.name);
-        if(ext !== 'pdf' && ext !== 'mp3') continue;
-        const key = normalizeName(f.name);
-        if(!byBase.has(key)) byBase.set(key,{title:f.name.replace(/\.[^.]+$/,''), style:style.name});
-        byBase.get(key)[ext] = f;
-      }
-      [...byBase.values()].filter(x=>x.pdf && x.mp3).forEach(x=>songs.push(x));
-    }
-    library = songs.sort((a,b)=>a.style.localeCompare(b.style)||a.title.localeCompare(b.title));
-    renderStyles(); applyFilters();
-    toast(`${library.length} músicas sincronizadas.`);
-  }catch(err){ console.error(err); toast(err.message || 'Erro ao sincronizar.'); }
+function pairFiles(style, files){
+  const map = new Map();
+  for(const file of files){
+    const ext = getExt(file.name);
+    if(ext !== 'pdf' && ext !== 'mp3') continue;
+    const base = normalizeBase(file.name);
+    if(!map.has(base)) map.set(base,{title:base,style:style.name,styleId:style.id});
+    const item = map.get(base);
+    if(ext==='pdf') item.pdf = file;
+    if(ext==='mp3') item.mp3 = file;
+  }
+  return [...map.values()].filter(x=>x.pdf && x.mp3).map(x=>({
+    title:x.title,
+    style:x.style,
+    styleId:x.styleId,
+    pdfId:x.pdf.id,
+    mp3Id:x.mp3.id,
+    pdfUrl:`https://drive.google.com/file/d/${x.pdf.id}/preview`,
+    mp3Url:`https://www.googleapis.com/drive/v3/files/${x.mp3.id}?alt=media`
+  }));
 }
 
 function renderStyles(){
-  const styles = ['Todos', ...new Set(library.map(s=>s.style))];
-  els.styleSelect.innerHTML = styles.map(s=>`<option>${s}</option>`).join('');
-  els.styleSelect.value = styles.includes(currentStyle) ? currentStyle : 'Todos';
+  const styles = [...new Set(library.map(s=>s.style))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const saved = localStorage.getItem(STORAGE.style);
+  els.styleSelect.innerHTML = '<option value="">Todos os estilos</option>' + styles.map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  if(saved && styles.includes(saved)) els.styleSelect.value = saved;
 }
 
 function applyFilters(){
-  const q = els.searchInput.value.trim().toLowerCase();
-  filteredSongs = library.filter(s => (currentStyle==='Todos'||s.style===currentStyle) && s.title.toLowerCase().includes(q));
-  currentIndex = 0;
-  renderList();
-  if(filteredSongs.length) loadSong(0); else clearStage();
+  const style = els.styleSelect.value;
+  const q = removeAccents(els.searchInput.value.trim().toLowerCase());
+  filteredSongs = library.filter(s=>(!style || s.style===style) && (!q || removeAccents(s.title.toLowerCase()).includes(q)));
+  renderSongs();
+  if(filteredSongs.length){ loadSong(Math.max(0, Math.min(currentIndex, filteredSongs.length-1)), false); }
+  else { clearCurrent(); }
 }
 
-function renderList(){
-  els.songList.innerHTML = filteredSongs.map((s,i)=>`<div class="song-item ${i===currentIndex?'active':''}" data-i="${i}"><strong>${s.title}</strong><span>${s.style}</span></div>`).join('');
-  els.songList.querySelectorAll('.song-item').forEach(el=>el.onclick=()=>loadSong(Number(el.dataset.i)));
+function renderSongs(){
+  els.songList.innerHTML = filteredSongs.map((s,i)=>`<div class="song-item ${i===currentIndex?'active':''}" data-index="${i}"><strong>${escapeHtml(s.title)}</strong><span>${escapeHtml(s.style)}</span></div>`).join('');
+  els.songList.querySelectorAll('.song-item').forEach(el=>el.addEventListener('click',()=>{loadSong(Number(el.dataset.index), true); els.sidebar.classList.remove('open');}));
 }
 
-async function loadSong(i){
-  if(!filteredSongs[i]) return;
-  currentIndex=i; renderList(); revokeUrls();
-  const song = filteredSongs[i];
+function loadSong(index, autoplay=false){
+  if(index<0 || index>=filteredSongs.length) return;
+  currentIndex=index;
+  const song = filteredSongs[index];
   els.songTitle.textContent = song.title;
-  els.songMeta.textContent = `${song.style} • ${i+1} de ${filteredSongs.length}`;
-  els.pdfFrame.src = '';
-  els.audio.removeAttribute('src');
-  toast('Carregando música...');
-  try{
-    const [pdfBlob, mp3Blob] = await Promise.all([fetchFileBlob(song.pdf.id), fetchFileBlob(song.mp3.id)]);
-    const pdfUrl = URL.createObjectURL(pdfBlob); const mp3Url = URL.createObjectURL(mp3Blob);
-    objectUrls.push(pdfUrl, mp3Url);
-    els.pdfFrame.src = pdfUrl;
-    els.audio.src = mp3Url;
-  }catch(err){ console.error(err); toast('Erro ao carregar PDF/MP3.'); }
+  els.songMeta.textContent = `${song.style} • ${index+1} de ${filteredSongs.length}`;
+  els.pdfFrame.src = song.pdfUrl;
+  els.audio.src = song.mp3Url;
+  els.audio.setAttribute('crossorigin','anonymous');
+  els.emptyState.style.display = 'none';
+  renderSongs();
+  if(autoplay) setTimeout(()=>els.audio.play().catch(()=>{}),250);
 }
 
-function clearStage(){
-  els.songTitle.textContent='Nenhuma música encontrada'; els.songMeta.textContent=''; els.pdfFrame.src=''; els.audio.removeAttribute('src'); els.songList.innerHTML='';
+function clearCurrent(){
+  currentIndex=-1;
+  els.songTitle.textContent = library.length ? 'Nenhuma música neste filtro' : 'Nenhuma música carregada';
+  els.songMeta.textContent = '';
+  els.pdfFrame.removeAttribute('src');
+  els.audio.removeAttribute('src');
+  els.emptyState.style.display = 'grid';
 }
-function go(delta){ if(!filteredSongs.length) return; loadSong((currentIndex + delta + filteredSongs.length) % filteredSongs.length); }
+
+function prevSong(){ if(filteredSongs.length) loadSong((currentIndex-1+filteredSongs.length)%filteredSongs.length, false); }
+function nextSong(){ if(filteredSongs.length) loadSong((currentIndex+1)%filteredSongs.length, false); }
+function togglePlay(){ if(!els.audio.src) return; els.audio.paused ? els.audio.play() : els.audio.pause(); }
+
+function toggleStage(){
+  document.body.classList.toggle('stage');
+  localStorage.setItem(STORAGE.stage, document.body.classList.contains('stage')?'1':'0');
+  updateStageBtn();
+}
+function updateStageBtn(){ els.stageBtn.textContent = document.body.classList.contains('stage') ? 'Sair do palco' : 'Modo palco'; }
+function fullscreen(){ const el=document.documentElement; if(!document.fullscreenElement) el.requestFullscreen?.(); else document.exitFullscreen?.(); }
+
+function clearFolder(){
+  localStorage.removeItem(STORAGE.folder);
+  els.folderIdInput.value='';
+  library=[]; filteredSongs=[]; renderStyles(); renderSongs(); clearCurrent();
+  toast('Pasta salva removida deste dispositivo.');
+}
+
+function openPicker(){
+  if(!ensureLogin()) return;
+  if(!pickerReady || !window.google?.picker){ toast('Seletor do Drive ainda está carregando.'); return; }
+  const apiKey = window.APP_CONFIG?.GOOGLE_API_KEY || '';
+  if(!apiKey){ toast('Google Picker precisa de API Key. Você ainda pode colar o ID da pasta manualmente.'); return; }
+  const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+    .setIncludeFolders(true)
+    .setSelectFolderEnabled(true)
+    .setMimeTypes('application/vnd.google-apps.folder');
+  const picker = new google.picker.PickerBuilder()
+    .addView(view)
+    .setOAuthToken(accessToken)
+    .setDeveloperKey(apiKey)
+    .setCallback(data=>{
+      if(data.action === google.picker.Action.PICKED){
+        const folder = data.docs[0];
+        els.folderIdInput.value = folder.id;
+        localStorage.setItem(STORAGE.folder, folder.id);
+        refreshLibrary();
+      }
+    })
+    .build();
+  picker.setVisible(true);
+}
+
+function keyboard(e){
+  if(e.target.matches('input,select,textarea')) return;
+  if(e.key==='ArrowRight') nextSong();
+  if(e.key==='ArrowLeft') prevSong();
+  if(e.key===' ') { e.preventDefault(); togglePlay(); }
+  if(e.key.toLowerCase()==='m') toggleStage();
+}
+
+function extractFolderId(value){
+  if(!value) return '';
+  const match = value.match(/folders\/([a-zA-Z0-9_-]+)/) || value.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : value.trim();
+}
+function getExt(name){ return (name.split('.').pop()||'').toLowerCase(); }
+function normalizeBase(name){ return name.replace(/\.[^.]+$/,'').trim(); }
+function removeAccents(s){ return s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function toast(msg){
+  els.toast.textContent = msg;
+  els.toast.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t=setTimeout(()=>els.toast.classList.remove('show'),3600);
+}
